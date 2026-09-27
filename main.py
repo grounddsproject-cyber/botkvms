@@ -19,7 +19,6 @@ DS_PREFIX = "!"
 
 SERVERS = ["The bruh Land", "Пивные дали", "Движуха"]
 
-# Правильные ANSI-коды для Discord
 ESC = "\x1b"
 ANSI_STATUS = {
     1: f"{ESC}[2;33mТехнические работы{ESC}[0m",
@@ -46,7 +45,6 @@ def load_json(path, default):
 def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=4)
 
-# Загружаем настройки и данные (теперь они сохраняются и не сбрасываются при перезапуске!)
 discord_config = load_json(CONFIG_FILE, {"status_channel_id": 0, "status_message_id": 0, "report_channel_id": 0, "report_message_id": 0})
 server_data = load_json(STATUS_FILE, {s: {"status": 5, "note": ""} for s in SERVERS})
 for s in SERVERS:
@@ -54,7 +52,6 @@ for s in SERVERS:
 save_json(CONFIG_FILE, discord_config)
 save_json(STATUS_FILE, server_data)
 
-# Ссылки на функции для прямой связи
 update_discord_func = None
 send_tg_alert_func = None
 
@@ -66,7 +63,6 @@ intents.members = True
 ds_bot = discord.Client(intents=intents)
 
 def build_status_message():
-    """Строит сообщение с гарантированным ANSI форматированием"""
     lines = ["```ansi", f"{ESC}[2;37m===== СТАТУС СЕРВЕРОВ ====={ESC}[0m", ""]
     for server in SERVERS:
         data = server_data[server]
@@ -80,7 +76,6 @@ def build_status_message():
     return "\n".join(lines)
 
 async def update_discord_status(changed_server=None):
-    """Обновляет сообщение в Discord"""
     channel_id = discord_config.get("status_channel_id", 0)
     if not channel_id: return
     channel = ds_bot.get_channel(channel_id)
@@ -116,6 +111,7 @@ async def update_discord_status(changed_server=None):
 async def on_ready():
     global update_discord_func
     logging.info(f"✅ Discord бот запущен: {ds_bot.user}")
+    logging.info(f"📊 Конфиг: {discord_config}")
     update_discord_func = update_discord_status
     if discord_config.get("status_channel_id"):
         await update_discord_status()
@@ -124,35 +120,51 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author == ds_bot.user: return
 
+    # Логируем ВСЕ сообщения для диагностики
+    logging.info(f" Сообщение от {message.author} в канале {message.channel.id}: '{message.content}'")
+
     # --- КАНАЛ ЖАЛОБ (.repcon) ---
     report_channel_id = discord_config.get("report_channel_id", 0)
+    logging.info(f"🔍 report_channel_id={report_channel_id}, текущий канал={message.channel.id}")
+    
     if message.channel.id == report_channel_id and report_channel_id != 0:
-        if message.id == discord_config.get("report_message_id"): return
+        logging.info(f"✅ Сообщение в канале жалоб! ID сообщения: {message.id}, report_message_id: {discord_config.get('report_message_id')}")
+        
+        if message.id == discord_config.get("report_message_id"):
+            logging.info("⚠️ Это сообщение бота, игнорируем")
+            return
         
         content = message.content.strip()
+        logging.info(f"📝 Содержание: '{content}'")
         
         # Пытаемся удалить сообщение пользователя
         try:
             await message.delete()
+            logging.info("✅ Сообщение удалено")
         except discord.Forbidden:
-            logging.error(" У бота нет прав 'Управлять сообщениями' в канале жалоб! Дайте ему это право.")
-            await message.channel.send("⚠️ Ошибка: у бота нет прав удалять сообщения в этом канале.")
+            logging.error("❌ У бота нет прав 'Управлять сообщениями'! Дайте это право в настройках сервера.")
+            await message.channel.send("⚠️ Ошибка: у бота нет прав удалять сообщения. Обратитесь к администратору.")
             return
         except Exception as e:
-            logging.error(f"Ошибка удаления: {e}")
+            logging.error(f"❌ Ошибка удаления: {e}")
 
         if content == ".repcon":
-            logging.info(f"🚨 Получена жалоба от {message.author}")
+            logging.info(f"🚨🚨 ПОЛУЧЕНА КОМАНДА .repcon ОТ {message.author}! 🚨🚨")
             notify = await message.channel.send("✅ Информация была успешно отправлена хосту. Ожидайте проверки.")
             
             # Прямое уведомление в Telegram
             if send_tg_alert_func:
+                logging.info("📱 Отправляем уведомление в Telegram...")
                 await send_tg_alert_func(str(message.author), message.guild.name, datetime.now().strftime("%d.%m.%Y %H:%M:%S"))
+                logging.info("✅ Уведомление отправлено в Telegram")
+            else:
+                logging.error("❌ send_tg_alert_func не установлен!")
             
             await asyncio.sleep(10)
             try: await notify.delete()
             except: pass
         else:
+            logging.info(f"⚠️ Не команда .repcon, отправляем предупреждение")
             warn = await message.channel.send(f"⚠️ {message.author.mention}, здесь принимаются **только команды**. Используйте `.repcon`")
             await asyncio.sleep(5)
             try: await warn.delete()
@@ -162,18 +174,18 @@ async def on_message(message: discord.Message):
     # --- КОМАНДЫ АДМИНА ---
     if message.content.startswith(DS_PREFIX) and message.author.guild_permissions.administrator:
         cmd = message.content[len(DS_PREFIX):].strip().lower()
+        logging.info(f" Команда админа: {cmd}")
         
         if cmd == "help":
             await message.channel.send(f"**Команды:**\n`{DS_PREFIX}setstatuschannel` - канал статусов\n`{DS_PREFIX}setrepconchannel` - канал жалоб")
         
         elif cmd == "setstatuschannel":
             discord_config["status_channel_id"] = message.channel.id
-            save_json(CONFIG_FILE, discord_config)
-            # Удаляем старое ID сообщения, чтобы бот создал новое в этом канале
-            discord_config["status_message_id"] = 0 
+            discord_config["status_message_id"] = 0
             save_json(CONFIG_FILE, discord_config)
             await update_discord_status()
             await message.channel.send("✅ Канал статусов установлен!")
+            logging.info(f"✅ Установлен канал статусов: {message.channel.id}")
         
         elif cmd == "setrepconchannel":
             discord_config["report_channel_id"] = message.channel.id
@@ -183,6 +195,7 @@ async def on_message(message: discord.Message):
             discord_config["report_message_id"] = msg.id
             save_json(CONFIG_FILE, discord_config)
             await message.channel.send("✅ Канал жалоб установлен! (Не забудьте дать боту право 'Управлять сообщениями')")
+            logging.info(f"✅ Установлен канал жалоб: {message.channel.id}, ID сообщения: {msg.id}")
 
 # ==================== TELEGRAM БОТ ====================
 tg_bot = Bot(token=TOKEN_TELEGRAM)
@@ -198,20 +211,26 @@ async def build_main_menu():
 async def build_server_menu(server: str):
     data = server_data[server]
     buttons = [[InlineKeyboardButton(text=f"{'✅ ' if c == data['status'] else ''}{n}", callback_data=f"set:{server}:{c}")] for c, n in STATUS_NAMES.items()]
-    buttons.append([InlineKeyboardButton(text="📝 Изменить заметку" if data.get("note") else "📝 Добавить заметку", callback_data=f"note:{server}")])
+    buttons.append([InlineKeyboardButton(text=" Изменить заметку" if data.get("note") else "📝 Добавить заметку", callback_data=f"note:{server}")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def send_tg_alert(user, guild, time):
     try:
-        await tg_bot.send_message(ADMIN_TG_ID, f" <b>Жалоба на подключение!</b>\n\nПользователь: <b>{user}</b>\nСервер: <b>{guild}</b>\nВремя: {time}", parse_mode="HTML")
+        logging.info(f"📤 Отправка в Telegram: ADMIN_TG_ID={ADMIN_TG_ID}")
+        await tg_bot.send_message(
+            ADMIN_TG_ID,
+            f" <b>Жалоба на подключение!</b>\n\nПользователь: <b>{user}</b>\nСервер: <b>{guild}</b>\nВремя: {time}",
+            parse_mode="HTML"
+        )
+        logging.info("✅ Сообщение отправлено в Telegram")
     except Exception as e:
-        logging.error(f"Ошибка отправки в TG: {e}")
+        logging.error(f"❌ Ошибка отправки в Telegram: {e}")
 
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     if message.from_user.id != ADMIN_TG_ID:
-        await message.answer(f"⛔ Доступ запрещён.\nТвой ID: `{message.from_user.id}`\nНужен: `{ADMIN_TG_ID}`")
+        await message.answer(f" Доступ запрещён.\nТвой ID: `{message.from_user.id}`\nНужен: `{ADMIN_TG_ID}`")
         return
     await message.answer("👋 <b>Панель управления</b>\nВыберите сервер:", reply_markup=await build_main_menu(), parse_mode="HTML")
 
@@ -224,7 +243,7 @@ async def callback_handler(callback: CallbackQuery, state: FSMContext):
 
     if data == "back:main":
         await state.clear()
-        await callback.message.edit_text("👋 <b>Панель управления</b>\nВыберите сервер:", reply_markup=await build_main_menu(), parse_mode="HTML")
+        await callback.message.edit_text(" <b>Панель управления</b>\nВыберите сервер:", reply_markup=await build_main_menu(), parse_mode="HTML")
     elif data.startswith("srv:"):
         server = data[4:]
         d = server_data[server]
@@ -240,7 +259,7 @@ async def callback_handler(callback: CallbackQuery, state: FSMContext):
             await update_discord_func(changed_server=server)
         
         d = server_data[server]
-        await callback.message.edit_text(f" <b>{server}</b>\nСтатус: <b>{STATUS_NAMES[code]}</b>\nЗаметка: <i>{d.get('note') or '—'}</i>", reply_markup=await build_server_menu(server), parse_mode="HTML")
+        await callback.message.edit_text(f"🖥 <b>{server}</b>\nСтатус: <b>{STATUS_NAMES[code]}</b>\nЗаметка: <i>{d.get('note') or '—'}</i>", reply_markup=await build_server_menu(server), parse_mode="HTML")
         await callback.answer("✅ Статус обновлён")
     elif data.startswith("note:"):
         await state.update_data(server=data[5:])
@@ -271,6 +290,11 @@ async def main():
     logging.info("=" * 50)
     logging.info("ЗАПУСК ОБОИХ БОТОВ")
     logging.info("=" * 50)
+    logging.info(f"Discord токен: {'✅' if TOKEN_DISCORD else '❌'}")
+    logging.info(f"Telegram токен: {'✅' if TOKEN_TELEGRAM else '❌'}")
+    logging.info(f"ADMIN_TG_ID: {ADMIN_TG_ID}")
+    logging.info(f"Конфиг: {discord_config}")
+    
     send_tg_alert_func = send_tg_alert
     
     await asyncio.gather(
