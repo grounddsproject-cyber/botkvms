@@ -19,27 +19,44 @@ DS_PREFIX = "!"
 
 SERVERS = ["The bruh Land", "Пивные дали", "Движуха"]
 
-STATUSES = {
-    1: "Технические работы",
-    2: "Сервер работает",
-    3: "Сервер остановлен",
-    4: "Сервер остановлен [открывается по запросу, расписания нету]",
-    5: "Неизвестно",
+# Правильные ANSI-коды для Discord
+ESC = "\x1b"
+ANSI_STATUS = {
+    1: f"{ESC}[2;33mТехнические работы{ESC}[0m",
+    2: f"{ESC}[2;36mСервер работает{ESC}[0m",
+    3: f"{ESC}[2;31mСервер остановлен{ESC}[0m",
+    4: f"{ESC}[2;31mСервер остановлен [открывается по запросу, расписания нету]{ESC}[0m",
+    5: f"{ESC}[2;34mНеизвестно{ESC}[0m",
 }
-STATUS_NAMES = STATUSES.copy()
+STATUS_NAMES = {1: "Технические работы", 2: "Сервер работает", 3: "Сервер остановлен", 4: "Остановлен [по запросу]", 5: "Неизвестно"}
+
+CONFIG_FILE = "config.json"
+STATUS_FILE = "statuses.json"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ==================== ОБЩЕЕ ХРАНИЛИЩЕ В ПАМЯТИ ====================
-# Это главная фишка — оба бота работают с ОДНОЙ переменной в памяти
-server_data = {s: {"status": 5, "note": ""} for s in SERVERS}
-discord_config = {
-    "status_channel_id": 0,
-    "status_message_id": 0,
-    "report_channel_id": 0,
-    "report_message_id": 0,
-}
-reports = []
+# ==================== ХРАНИЛИЩЕ ====================
+def load_json(path, default):
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f: return json.load(f)
+        except: return default
+    return default
+
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=4)
+
+# Загружаем настройки и данные (теперь они сохраняются и не сбрасываются при перезапуске!)
+discord_config = load_json(CONFIG_FILE, {"status_channel_id": 0, "status_message_id": 0, "report_channel_id": 0, "report_message_id": 0})
+server_data = load_json(STATUS_FILE, {s: {"status": 5, "note": ""} for s in SERVERS})
+for s in SERVERS:
+    if s not in server_data: server_data[s] = {"status": 5, "note": ""}
+save_json(CONFIG_FILE, discord_config)
+save_json(STATUS_FILE, server_data)
+
+# Ссылки на функции для прямой связи
+update_discord_func = None
+send_tg_alert_func = None
 
 # ==================== DISCORD БОТ ====================
 intents = discord.Intents.default()
@@ -48,32 +65,26 @@ intents.guilds = True
 intents.members = True
 ds_bot = discord.Client(intents=intents)
 
-# Ссылка на функцию обновления — будет установлена после создания ботов
-update_discord_status_func = None
-send_tg_notification_func = None
-
 def build_status_message():
-    lines = ["===== СТАТУС СЕРВЕРОВ =====", ""]
+    """Строит сообщение с гарантированным ANSI форматированием"""
+    lines = ["```ansi", f"{ESC}[2;37m===== СТАТУС СЕРВЕРОВ ====={ESC}[0m", ""]
     for server in SERVERS:
         data = server_data[server]
-        status_text = STATUSES.get(data["status"], "Неизвестно")
+        status_text = ANSI_STATUS.get(data["status"], ANSI_STATUS[5])
         note = data.get("note", "")
+        lines.append(f"{ESC}[1;37m{server}:{ESC}[0m {status_text}")
         if note:
-            lines.append(f"{server}: {status_text}")
-            lines.append(f"   📝 {note}")
-        else:
-            lines.append(f"{server}: {status_text}")
+            lines.append(f"   {ESC}[2;37m📝 {note}{ESC}[0m")
         lines.append("")
-    return "```ansi\n" + "\n".join(lines) + "```"
+    lines.append("```")
+    return "\n".join(lines)
 
 async def update_discord_status(changed_server=None):
     """Обновляет сообщение в Discord"""
     channel_id = discord_config.get("status_channel_id", 0)
-    if not channel_id:
-        return
+    if not channel_id: return
     channel = ds_bot.get_channel(channel_id)
-    if not channel:
-        return
+    if not channel: return
 
     content = build_status_message()
     msg_id = discord_config.get("status_message_id", 0)
@@ -86,9 +97,11 @@ async def update_discord_status(changed_server=None):
             except discord.NotFound:
                 msg = await channel.send(content)
                 discord_config["status_message_id"] = msg.id
+                save_json(CONFIG_FILE, discord_config)
         else:
             msg = await channel.send(content)
             discord_config["status_message_id"] = msg.id
+            save_json(CONFIG_FILE, discord_config)
     except Exception as e:
         logging.error(f"Ошибка обновления Discord: {e}")
 
@@ -97,94 +110,79 @@ async def update_discord_status(changed_server=None):
             ping = await channel.send(f"@everyone Статус сервера **{changed_server}** был обновлён!")
             await asyncio.sleep(10)
             await ping.delete()
-        except:
-            pass
-
-async def send_tg_alert(user, guild, time):
-    """Отправляет уведомление в Telegram о жалобе"""
-    try:
-        await tg_bot.send_message(
-            ADMIN_TG_ID,
-            f"🚨 <b>Жалоба на подключение!</b>\n\n"
-            f"Пользователь: <b>{user}</b>\n"
-            f"Сервер: <b>{guild}</b>\n"
-            f"Время: {time}",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logging.error(f"Ошибка отправки в TG: {e}")
+        except: pass
 
 @ds_bot.event
 async def on_ready():
-    global update_discord_status_func
+    global update_discord_func
     logging.info(f"✅ Discord бот запущен: {ds_bot.user}")
-    update_discord_status_func = update_discord_status
+    update_discord_func = update_discord_status
     if discord_config.get("status_channel_id"):
         await update_discord_status()
 
 @ds_bot.event
 async def on_message(message: discord.Message):
-    if message.author == ds_bot.user:
-        return
+    if message.author == ds_bot.user: return
 
-    # Канал жалоб
+    # --- КАНАЛ ЖАЛОБ (.repcon) ---
     report_channel_id = discord_config.get("report_channel_id", 0)
     if message.channel.id == report_channel_id and report_channel_id != 0:
-        if message.id == discord_config.get("report_message_id"):
-            return
+        if message.id == discord_config.get("report_message_id"): return
         
         content = message.content.strip()
+        
+        # Пытаемся удалить сообщение пользователя
         try:
             await message.delete()
-        except:
-            pass
+        except discord.Forbidden:
+            logging.error(" У бота нет прав 'Управлять сообщениями' в канале жалоб! Дайте ему это право.")
+            await message.channel.send("⚠️ Ошибка: у бота нет прав удалять сообщения в этом канале.")
+            return
+        except Exception as e:
+            logging.error(f"Ошибка удаления: {e}")
 
         if content == ".repcon":
+            logging.info(f"🚨 Получена жалоба от {message.author}")
             notify = await message.channel.send("✅ Информация была успешно отправлена хосту. Ожидайте проверки.")
             
-            # ПРЯМОЕ уведомление в Telegram
-            if send_tg_notification_func:
-                await send_tg_notification_func(
-                    str(message.author),
-                    message.guild.name,
-                    datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-                )
+            # Прямое уведомление в Telegram
+            if send_tg_alert_func:
+                await send_tg_alert_func(str(message.author), message.guild.name, datetime.now().strftime("%d.%m.%Y %H:%M:%S"))
             
             await asyncio.sleep(10)
-            try:
-                await notify.delete()
-            except:
-                pass
+            try: await notify.delete()
+            except: pass
         else:
-            warn = await message.channel.send(f"⚠️ {message.author.mention}, здесь только команды. Используйте `.repcon`")
+            warn = await message.channel.send(f"⚠️ {message.author.mention}, здесь принимаются **только команды**. Используйте `.repcon`")
             await asyncio.sleep(5)
-            try:
-                await warn.delete()
-            except:
-                pass
+            try: await warn.delete()
+            except: pass
         return
 
-    # Команды админа
+    # --- КОМАНДЫ АДМИНА ---
     if message.content.startswith(DS_PREFIX) and message.author.guild_permissions.administrator:
         cmd = message.content[len(DS_PREFIX):].strip().lower()
         
         if cmd == "help":
-            await message.channel.send(
-                f"**Команды:**\n"
-                f"`{DS_PREFIX}setstatuschannel` - канал статусов\n"
-                f"`{DS_PREFIX}setrepconchannel` - канал жалоб"
-            )
+            await message.channel.send(f"**Команды:**\n`{DS_PREFIX}setstatuschannel` - канал статусов\n`{DS_PREFIX}setrepconchannel` - канал жалоб")
+        
         elif cmd == "setstatuschannel":
             discord_config["status_channel_id"] = message.channel.id
-            msg = await message.channel.send(build_status_message())
-            discord_config["status_message_id"] = msg.id
+            save_json(CONFIG_FILE, discord_config)
+            # Удаляем старое ID сообщения, чтобы бот создал новое в этом канале
+            discord_config["status_message_id"] = 0 
+            save_json(CONFIG_FILE, discord_config)
+            await update_discord_status()
             await message.channel.send("✅ Канал статусов установлен!")
+        
         elif cmd == "setrepconchannel":
             discord_config["report_channel_id"] = message.channel.id
+            save_json(CONFIG_FILE, discord_config)
             text = "Если вы испытываете проблемы с подключением к серверу, напишите команду `.repcon` в этот чат **ТОЛЬКО В ЭТОТ ЧАТ**"
             msg = await message.channel.send(text)
             discord_config["report_message_id"] = msg.id
-            await message.channel.send("✅ Канал жалоб установлен!")
+            save_json(CONFIG_FILE, discord_config)
+            await message.channel.send("✅ Канал жалоб установлен! (Не забудьте дать боту право 'Управлять сообщениями')")
 
 # ==================== TELEGRAM БОТ ====================
 tg_bot = Bot(token=TOKEN_TELEGRAM)
@@ -194,42 +192,28 @@ class NoteStates(StatesGroup):
     waiting_note = State()
 
 async def build_main_menu():
-    buttons = []
-    for server in SERVERS:
-        data = server_data[server]
-        status_name = STATUS_NAMES.get(data["status"], "Неизвестно")
-        buttons.append([InlineKeyboardButton(
-            text=f"{server} [{status_name}]",
-            callback_data=f"srv:{server}"
-        )])
+    buttons = [[InlineKeyboardButton(text=f"{s} [{STATUS_NAMES[server_data[s]['status']]}]", callback_data=f"srv:{s}")] for s in SERVERS]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def build_server_menu(server: str):
     data = server_data[server]
-    buttons = []
-    for code, name in STATUS_NAMES.items():
-        mark = "✅ " if code == data["status"] else ""
-        buttons.append([InlineKeyboardButton(
-            text=f"{mark}{name}",
-            callback_data=f"set:{server}:{code}"
-        )])
-    buttons.append([InlineKeyboardButton(
-        text="📝 Изменить заметку" if data.get("note") else " Добавить заметку",
-        callback_data=f"note:{server}"
-    )])
+    buttons = [[InlineKeyboardButton(text=f"{'✅ ' if c == data['status'] else ''}{n}", callback_data=f"set:{server}:{c}")] for c, n in STATUS_NAMES.items()]
+    buttons.append([InlineKeyboardButton(text="📝 Изменить заметку" if data.get("note") else "📝 Добавить заметку", callback_data=f"note:{server}")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back:main")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+async def send_tg_alert(user, guild, time):
+    try:
+        await tg_bot.send_message(ADMIN_TG_ID, f" <b>Жалоба на подключение!</b>\n\nПользователь: <b>{user}</b>\nСервер: <b>{guild}</b>\nВремя: {time}", parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Ошибка отправки в TG: {e}")
 
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     if message.from_user.id != ADMIN_TG_ID:
         await message.answer(f"⛔ Доступ запрещён.\nТвой ID: `{message.from_user.id}`\nНужен: `{ADMIN_TG_ID}`")
         return
-    await message.answer(
-        "👋 <b>Панель управления</b>\nВыберите сервер:",
-        reply_markup=await build_main_menu(),
-        parse_mode="HTML"
-    )
+    await message.answer("👋 <b>Панель управления</b>\nВыберите сервер:", reply_markup=await build_main_menu(), parse_mode="HTML")
 
 @dp.callback_query()
 async def callback_handler(callback: CallbackQuery, state: FSMContext):
@@ -240,38 +224,23 @@ async def callback_handler(callback: CallbackQuery, state: FSMContext):
 
     if data == "back:main":
         await state.clear()
-        await callback.message.edit_text(
-            "👋 <b>Панель управления</b>\nВыберите сервер:",
-            reply_markup=await build_main_menu(),
-            parse_mode="HTML"
-        )
+        await callback.message.edit_text("👋 <b>Панель управления</b>\nВыберите сервер:", reply_markup=await build_main_menu(), parse_mode="HTML")
     elif data.startswith("srv:"):
         server = data[4:]
         d = server_data[server]
-        await callback.message.edit_text(
-            f"🖥 <b>{server}</b>\nСтатус: <b>{STATUS_NAMES[d['status']]}</b>\nЗаметка: <i>{d.get('note') or '—'}</i>",
-            reply_markup=await build_server_menu(server),
-            parse_mode="HTML"
-        )
+        await callback.message.edit_text(f"🖥 <b>{server}</b>\nСтатус: <b>{STATUS_NAMES[d['status']]}</b>\nЗаметка: <i>{d.get('note') or '—'}</i>", reply_markup=await build_server_menu(server), parse_mode="HTML")
     elif data.startswith("set:"):
         _, server, code = data.split(":")
         code = int(code)
-        
-        # МЕНЯЕМ СТАТУС В ОБЩЕЙ ПАМЯТИ
         server_data[server]["status"] = code
+        save_json(STATUS_FILE, server_data)
         logging.info(f"✅ Telegram изменил статус: {server} -> {code}")
         
-        # ПРЯМОЕ обновление Discord
-        if update_discord_status_func:
-            await update_discord_status_func(changed_server=server)
-            logging.info(f"✅ Discord обновлён для: {server}")
+        if update_discord_func:
+            await update_discord_func(changed_server=server)
         
         d = server_data[server]
-        await callback.message.edit_text(
-            f"🖥 <b>{server}</b>\nСтатус: <b>{STATUS_NAMES[code]}</b>\nЗаметка: <i>{d.get('note') or '—'}</i>",
-            reply_markup=await build_server_menu(server),
-            parse_mode="HTML"
-        )
+        await callback.message.edit_text(f" <b>{server}</b>\nСтатус: <b>{STATUS_NAMES[code]}</b>\nЗаметка: <i>{d.get('note') or '—'}</i>", reply_markup=await build_server_menu(server), parse_mode="HTML")
         await callback.answer("✅ Статус обновлён")
     elif data.startswith("note:"):
         await state.update_data(server=data[5:])
@@ -280,42 +249,29 @@ async def callback_handler(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(NoteStates.waiting_note)
 async def note_handler(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_TG_ID:
-        return
+    if message.from_user.id != ADMIN_TG_ID: return
     data = await state.get_data()
     server = data.get("server")
-    if not server:
-        return
+    if not server: return
     
     text = message.text.strip()
-    note = "" if text == "-" else text
+    server_data[server]["note"] = "" if text == "-" else text
+    save_json(STATUS_FILE, server_data)
+    logging.info(f"✅ Telegram изменил заметку: {server}")
     
-    # МЕНЯЕМ ЗАМЕТКУ В ОБЩЕЙ ПАМЯТИ
-    server_data[server]["note"] = note
-    logging.info(f"✅ Telegram изменил заметку: {server} -> '{note}'")
-    
-    # ПРЯМОЕ обновление Discord
-    if update_discord_status_func:
-        await update_discord_status_func()
-        logging.info(f"✅ Discord обновлён (заметка) для: {server}")
+    if update_discord_func:
+        await update_discord_func()
     
     await state.clear()
-    await message.answer(
-        f"✅ Заметка для {server} обновлена.",
-        reply_markup=await build_server_menu(server),
-        parse_mode="HTML"
-    )
+    await message.answer(f"✅ Заметка для {server} обновлена.", reply_markup=await build_server_menu(server), parse_mode="HTML")
 
 # ==================== ЗАПУСК ====================
 async def main():
-    global send_tg_notification_func
-    
+    global send_tg_alert_func
     logging.info("=" * 50)
-    logging.info("ЗАПУСК ОБОИХ БОТОВ С ПРЯМОЙ СВЯЗЬЮ")
+    logging.info("ЗАПУСК ОБОИХ БОТОВ")
     logging.info("=" * 50)
-    
-    # Устанавливаем прямую ссылку на функцию уведомлений
-    send_tg_notification_func = send_tg_alert
+    send_tg_alert_func = send_tg_alert
     
     await asyncio.gather(
         ds_bot.start(TOKEN_DISCORD),
